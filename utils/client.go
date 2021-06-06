@@ -1,13 +1,12 @@
-package openvpn
+package utils
 
 type Client struct {
 	CommonName       string
 	PublicIP         string
 	PrivateIP        string
-	BytesRecived     string
-	BytesSent        string
+	BytesRecived     int64
+	BytesSent        int64
 	LastRef          string
-	waitForPrivateIP chan bool
 	missing          int
 	Env              map[string]string
 }

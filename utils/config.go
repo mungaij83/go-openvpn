@@ -1,4 +1,4 @@
-package openvpn
+package utils
 
 import (
 	"net"
@@ -121,7 +121,6 @@ func (c *Config) setManagementPath(path string) {
 		c.Flag("management-hold")
 		c.Flag("management-signal")
 		c.Flag("management-up-down")
-
 		log.Info("Current config:", c)
 	}
 }

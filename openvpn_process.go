@@ -1,8 +1,9 @@
-package openvpn
+package go_openvpn
 
 import (
 	"bufio"
 	"fmt"
+	"github.com/mungaij83/go-openvpn/utils"
 	"os/exec"
 	"sync"
 
@@ -11,14 +12,14 @@ import (
 )
 
 type Process struct {
-	StdOut     chan string `json:"-"`
-	StdErr     chan string `json:"-"`
-	Events     chan *Event `json:"-"`
-	Stopped    chan bool   `json:"-"`
+	StdOut     chan string       `json:"-"`
+	StdErr     chan string       `json:"-"`
+	Events     chan *utils.Event `json:"-"`
+	Stopped    chan bool         `json:"-"`
 	parameters []string
-	config     *Config
+	config     *utils.Config
 	Env        map[string]string
-	Clients    map[string]*Client
+	Clients    map[string]*utils.Client
 
 	management *Management
 
@@ -29,8 +30,8 @@ type Process struct {
 func NewProcess() *Process {
 	p := &Process{
 		Env:     make(map[string]string, 0),
-		Events:  make(chan *Event, 10),
-		Clients: make(map[string]*Client, 0),
+		Events:  make(chan *utils.Event, 10),
+		Clients: make(map[string]*utils.Client, 0),
 
 		shutdown: make(chan bool),
 	}
@@ -44,7 +45,7 @@ func NewProcess() *Process {
 
 func NewSslServer(ca *openssl.CA, cert *openssl.Cert, dh *openssl.DH, ta *openssl.TA) *Process { // {{{
 	p := NewProcess()
-	c := NewConfig()
+	c := utils.NewConfig()
 
 	c.Device("tun")
 	c.ServerMode(1194, ca, cert, dh, ta)
@@ -60,7 +61,7 @@ func NewSslServer(ca *openssl.CA, cert *openssl.Cert, dh *openssl.DH, ta *openss
 }                                                                                                               // }}}
 func NewSslClient(remote string, ca *openssl.CA, cert *openssl.Cert, dh *openssl.DH, ta *openssl.TA) *Process { // {{{
 	p := NewProcess()
-	c := NewConfig()
+	c := utils.NewConfig()
 
 	c.ClientMode(ca, cert, dh, ta)
 	c.Remote(remote, 1194)
@@ -76,7 +77,7 @@ func NewSslClient(remote string, ca *openssl.CA, cert *openssl.Cert, dh *openssl
 }                                              // }}}
 func NewStaticKeyServer(key string) *Process { // {{{
 	p := NewProcess()
-	c := NewConfig()
+	c := utils.NewConfig()
 
 	c.Device("tun")
 	c.IpConfig("10.8.0.1", "10.8.0.2")
@@ -89,10 +90,11 @@ func NewStaticKeyServer(key string) *Process { // {{{
 
 	p.SetConfig(c)
 	return p
-}                                                      // }}}
-func NewStaticKeyClient(remote, key string) *Process { // {{{
+}
+
+func NewStaticKeyClient(remote, key string) *Process {
 	p := NewProcess()
-	c := NewConfig()
+	c := utils.NewConfig()
 
 	c.Remote(remote, 1194)
 	c.Device("tun")
@@ -106,9 +108,9 @@ func NewStaticKeyClient(remote, key string) *Process { // {{{
 
 	p.SetConfig(c)
 	return p
-} // }}}
+}
 
-func (p *Process) SetConfig(c *Config) {
+func (p *Process) SetConfig(c *utils.Config) {
 	p.config = c
 }
 
@@ -119,34 +121,33 @@ func (p *Process) Start() (err error) { // {{{
 		case <-p.Stopped:
 			// Everything is good, no process running
 		default:
-			return fmt.Errorf("Openvpn is already started, aborting")
+			return fmt.Errorf("openvpn is already started, aborting")
 		}
 	}
-
 	// Start the management interface (if it isnt already started)
-	path, err := p.management.Start()
+	err = p.management.Start()
 	if err != nil {
 		return err
 	}
-
 	// Add the management interface path to the config
-	p.config.setManagementPath(path)
-
 	return p.Restart()
-}                                      // }}}
-func (p *Process) Stop() (err error) { // {{{
+}
+
+func (p *Process) Stop() (err error) {
 	close(p.shutdown)
 	p.waitGroup.Wait()
 
 	return
-}                                          // }}}
-func (p *Process) Shutdown() (err error) { // {{{
+}
+
+func (p *Process) Shutdown() (err error) {
 	p.Stop()
 	p.management.Shutdown()
 
 	return
-}                                         // }}}
-func (p *Process) Restart() (err error) { // {{{
+}
+
+func (p *Process) Restart() (err error) {
 	// Fetch the current config
 	config, err := p.config.Validate()
 	if err != nil {
@@ -168,20 +169,20 @@ func (p *Process) Restart() (err error) { // {{{
 	}
 
 	return
-} // }}}
+}
 
-func (p *Process) Fire(name string, args ...string) { // {{{
+func (p *Process) Fire(name string, args ...string) {
 	select {
-	case p.Events <- &Event{
+	case p.Events <- &utils.Event{
 		Name: name,
 		Args: args,
 	}:
 	default:
 		log.Warn("Lost event: ", name, " args:", args)
 	}
-} // }}}
+}
 
-func (p *Process) ProcessMonitor(cmd *exec.Cmd, release chan bool) { // {{{
+func (p *Process) ProcessMonitor(cmd *exec.Cmd, release chan bool) {
 
 	p.stdoutMonitor(cmd)
 	p.stderrMonitor(cmd)
@@ -216,8 +217,9 @@ func (p *Process) ProcessMonitor(cmd *exec.Cmd, release chan bool) { // {{{
 		}
 
 	}()
-}                                                // }}}
-func (p *Process) stdoutMonitor(cmd *exec.Cmd) { // {{{
+}
+
+func (p *Process) stdoutMonitor(cmd *exec.Cmd) {
 	stdout, _ := cmd.StdoutPipe()
 	go func() {
 		p.waitGroup.Add(1)
@@ -237,8 +239,9 @@ func (p *Process) stdoutMonitor(cmd *exec.Cmd) { // {{{
 			return
 		}
 	}()
-}                                                // }}}
-func (p *Process) stderrMonitor(cmd *exec.Cmd) { // {{{
+}
+
+func (p *Process) stderrMonitor(cmd *exec.Cmd) {
 	stderr, _ := cmd.StderrPipe()
 	go func() {
 		p.waitGroup.Add(1)
@@ -257,4 +260,4 @@ func (p *Process) stderrMonitor(cmd *exec.Cmd) { // {{{
 			return
 		}
 	}()
-} // }}}
+}

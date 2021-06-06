@@ -1,4 +1,4 @@
-package openvpn
+package utils
 
 type Event struct {
 	Name string
