@@ -2,7 +2,6 @@ package core
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"github.com/golang/glog"
@@ -17,6 +16,7 @@ type TcpConnector struct {
 	ipAddress  string
 	password   string
 	shutdown   chan bool
+	events     chan string
 	connection net.Conn
 	listener   net.Listener
 }
@@ -24,6 +24,7 @@ type TcpConnector struct {
 func NewTcpConnector(ipAddress string, port int, password string, mode int) OpenVpnConnector {
 	return &TcpConnector{
 		shutdown:  make(chan bool),
+		events:    make(chan string, 10),
 		mode:      mode,
 		port:      port,
 		ipAddress: ipAddress,
@@ -43,6 +44,7 @@ func (s *TcpConnector) Connect() error {
 			glog.Error(err)
 			return err
 		}
+		glog.V(2).Infof("OpenVPN started on: %v", s.GetManagementAddress())
 	} else {
 		glog.V(2).Infof("OpenVPN is started in client mode")
 		c, err := net.Dial("tcp", "127.0.0.1:17505")
@@ -58,6 +60,7 @@ func (s *TcpConnector) Connect() error {
 
 func (s *TcpConnector) SendCommand(command string) (string, error) {
 	if s.mode == ServerMode {
+		s.events <- command
 		return "", errors.New("OpenVPN server running in server mode")
 	}
 	cmdStr := fmt.Sprintf("%s\n", strings.TrimSpace(command))
@@ -77,22 +80,37 @@ func (s *TcpConnector) SendCommand(command string) (string, error) {
 	}
 }
 
-func (s *TcpConnector) serve(c net.Conn, events chan []string) {
+func (s *TcpConnector) serve(c net.Conn, events chan string) {
+	glog.V(2).Infof("Serving client: %v", c.RemoteAddr().String())
 	reader := bufio.NewReader(c)
+	go func() {
+		for {
+			select {
+			case <-s.shutdown:
+				return
+			case e := <-s.events:
+				command := fmt.Sprintf("%s\n", strings.TrimSpace(e))
+				_, err := c.Write([]byte(command))
+				if err != nil {
+					glog.Error(err)
+				} else {
+					glog.Infof(">>CMD OUT: %v", command)
+				}
+
+			}
+		}
+	}()
 	tp := textproto.NewReader(reader)
-	bufer := bytes.Buffer{}
 	for {
 		line, err := tp.ReadLine()
 		if err != nil {
 			break
 		}
-		bufer.WriteString(line)
+		events <- line
 	}
-	lines := bufer.String()
-	events <- []string{lines}
 }
 
-func (s *TcpConnector) Listen(events chan []string) {
+func (s *TcpConnector) Listen(events chan string) {
 	if s.mode == ServerMode {
 		go func() {
 			for {
@@ -100,10 +118,12 @@ func (s *TcpConnector) Listen(events chan []string) {
 				if err2 != nil {
 					glog.Error(err2)
 				} else {
-					s.serve(conn, events)
+					go s.serve(conn, events)
 				}
 			}
 		}()
+	} else {
+		glog.Warningf("TCP Server running in client mode")
 	}
 }
 

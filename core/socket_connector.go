@@ -2,19 +2,20 @@ package core
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"github.com/golang/glog"
 	"net"
 	"net/textproto"
 	"strings"
+	"time"
 )
 
 type SocketConnector struct {
 	socket     string
 	password   string
 	shutdown   chan bool
+	events     chan string
 	mode       int
 	listener   net.Listener
 	connection net.Conn
@@ -23,6 +24,7 @@ type SocketConnector struct {
 func NewSocketConnector(socket string, password string, mode int) OpenVpnConnector {
 	return &SocketConnector{
 		socket:   socket,
+		events:   make(chan string, 10),
 		password: password,
 		mode:     mode,
 		shutdown: make(chan bool),
@@ -49,7 +51,9 @@ func (s *SocketConnector) Connect() error {
 
 func (s *SocketConnector) SendCommand(command string) (string, error) {
 	if s.mode == ServerMode {
-		return "", errors.New("OpenVPN server running in server mode")
+		glog.V(2).Infof("CMD IN: %v", command)
+		s.events <- command
+		return "", errors.New("OpenVPN server running in server mode, queued")
 	}
 	cmdStr := fmt.Sprintf("%s\n", strings.TrimSpace(command))
 	_, err := s.connection.Write([]byte(cmdStr))
@@ -68,7 +72,7 @@ func (s *SocketConnector) SendCommand(command string) (string, error) {
 	}
 }
 
-func (s *SocketConnector) Listen(events chan []string) {
+func (s *SocketConnector) Listen(events chan string) {
 	if s.mode == ServerMode {
 		go func() {
 			for {
@@ -78,31 +82,60 @@ func (s *SocketConnector) Listen(events chan []string) {
 					select {
 					case <-s.shutdown:
 						glog.Info("Management: closed")
+						break
 					default:
 						glog.Errorf("accept error: %v", err)
 					}
-					return
+					continue
 				}
 
 				go s.serve(fd, events)
 			}
 		}()
+	} else {
+		glog.Warningf("Socket Server running in client mode")
 	}
 }
 
-func (s *SocketConnector) serve(c net.Conn, events chan []string) {
+func (s *SocketConnector) serve(c net.Conn, events chan string) {
+	glog.V(2).Infof("Serving client: %v", c.RemoteAddr().String())
 	reader := bufio.NewReader(c)
 	tp := textproto.NewReader(reader)
-	bufer := bytes.Buffer{}
+	go func() {
+		timer := time.NewTimer(time.Second * 5)
+		for {
+			select {
+			case e := <-s.events:
+				glog.V(4).Infof("CMD: %v", e)
+				s.Write(c, e)
+				break
+			case <-timer.C:
+				//s.Write(c, "status")
+				break
+			case <-s.shutdown:
+				return
+			}
+		}
+	}()
 	for {
 		line, err := tp.ReadLine()
 		if err != nil {
 			break
 		}
-		bufer.WriteString(line)
+		glog.V(8).Infof("Received MSG:%v", line)
+		events <- line
 	}
-	lines := bufer.String()
-	events <- []string{lines}
+}
+
+func (s *SocketConnector) Write(c net.Conn, cmd string) {
+	glog.V(4).Infof("Received: %v", cmd)
+	data := fmt.Sprintf("%s\n", strings.TrimSpace(cmd))
+	d, err := c.Write([]byte(data))
+	if err != nil {
+		glog.Errorf("Failed to send command: %v", err)
+	} else {
+		glog.V(2).Infof("Command sent to the server[%d]: %s", d, strings.TrimSpace(cmd))
+	}
 }
 
 func (s *SocketConnector) Close() error {

@@ -10,21 +10,26 @@ import (
 	"strings"
 )
 
-const (
-	ClientList = "(?ms)OpenVPN CLIENT LIST\n" +
+var (
+	ClientListReg, _ = regexp.Compile("(?ms)OpenVPN CLIENT LIST\n" +
 		"Updated,([^\n]*)\n" +
 		"(.*)\n" +
 		"ROUTING TABLE\n" +
 		"(.*)\n" +
 		"GLOBAL STATS\n" +
 		"(.*)" +
-		"\nEND\n"
+		"\nEND\n")
+	ClientEnv, _ = regexp.Compile("([^=\r\n]+)=([^\r\n]*)")
 )
 
 type EventData struct {
 	Event     string
 	EventType string
+	Completed bool
+	HasEnd    bool
 	Realtime  bool
+	Invalid   bool
+	Data      map[string]string
 	EventData string
 }
 
@@ -33,14 +38,34 @@ func (ed EventData) EventName() string {
 	return strings.TrimSuffix(tmp, "_")
 }
 
+func (ed *EventData) Merge(data EventData) {
+	ed.Completed = data.Completed
+	ed.Invalid = data.Invalid
+	for k, v := range data.Data {
+		ed.Data[k] = v
+	}
+}
+
+func (ed EventData) Get(k string) string {
+	if len(ed.Data) > 0 {
+		val, ok := ed.Data[k]
+		if ok {
+			return val
+		}
+	}
+	return ""
+}
+
 type CommandParser struct {
 	ClientListReg *regexp.Regexp
+	buffer        *EventData
+	dataBuffer    *bytes.Buffer
 }
 
 func NewCommandParser() CommandParser {
-	reg, _ := regexp.Compile(ClientList)
 	return CommandParser{
-		ClientListReg: reg,
+		dataBuffer:    bytes.NewBufferString(""),
+		ClientListReg: ClientListReg,
 	}
 }
 
@@ -55,8 +80,23 @@ func (cp CommandParser) Join(evt []string, start int, sep string) string {
 	return strings.TrimSuffix(b.String(), sep)
 }
 
-func (cp CommandParser) ParseEvent(evt string) EventData {
-	dt := EventData{}
+func (cp *CommandParser) ParseEvent(evt string) *EventData {
+	// Handle listing events
+	if cp.buffer != nil && cp.buffer.Event == "CLIENT_LIST" {
+		cp.dataBuffer.WriteString(evt)
+		if strings.Compare(strings.TrimSpace(evt), "END") == 0 {
+			cp.buffer.EventData = cp.dataBuffer.String()
+			cp.dataBuffer.Reset()
+			dt := *cp.buffer
+			cp.buffer = nil
+			return &dt
+		}
+		return nil
+	}
+	// Handle other events
+	dt := EventData{
+		Data: make(map[string]string),
+	}
 	el := strings.Split(evt, ":")
 	if strings.HasPrefix(evt, ">") {
 		dt.Realtime = true
@@ -64,6 +104,7 @@ func (cp CommandParser) ParseEvent(evt string) EventData {
 		dt.EventData = cp.Join(el, 1, ":")
 	} else if strings.HasPrefix(evt, "OpenVPN") {
 		dt.Event = "CLIENT_LIST"
+		dt.HasEnd = true
 		dt.EventData = strings.TrimSuffix(evt, "OpenVPN CLIENT LIST")
 	} else {
 		dt.Event = el[0]
@@ -76,14 +117,96 @@ func (cp CommandParser) ParseEvent(evt string) EventData {
 		typed := strings.Split(el[1], ",")
 		dt.EventType = typed[0]
 		dt.EventData = cp.Join(typed, 1, ",")
+		err := cp.ParseClient(&dt)
+		if err != nil {
+			glog.Error(err)
+		}
+		break
+	case "BYTECOUNT":
+		s := strings.Split(dt.EventData, ",")
+		dt.Data["bytes_in"] = s[0]
+		dt.Data["bytes_out"] = s[1]
+		dt.Completed = true
+		break
+	case "BYTECOUNT_CLI":
+		s := strings.Split(dt.EventData, ",")
+		dt.Data["client_id"] = s[0]
+		dt.Data["bytes_in"] = s[1]
+		dt.Data["bytes_out"] = s[2]
+		dt.Completed = true
+		break
+	case "CLIENT_LIST":
+		cp.dataBuffer.WriteString(evt)
+		dt.HasEnd = true
 		break
 	default:
+		dt.Completed = true
 		dt.EventType = ""
 	}
-	return dt
+	// Check for event
+	if dt.Completed || dt.Invalid {
+		glog.V(2).Infof("Returning event: %v", dt)
+		if dt.Completed && cp.buffer != nil {
+			cp.buffer.Merge(dt)
+			dt = *cp.buffer
+			cp.buffer = nil
+		}
+		return &dt
+	} else {
+		glog.V(2).Infof("Saving state: %v", dt)
+		// Update state
+		if cp.buffer != nil {
+			cp.buffer.Merge(dt)
+		} else {
+			cp.buffer = &dt
+		}
+	}
+	return nil
+}
+func (cp *CommandParser) ParseClient(data *EventData) error {
+	switch data.EventType {
+	case "ENV":
+		if data.EventData == "END" {
+			data.Completed = true
+		} else {
+			s := strings.Split(data.EventData, "=")
+			data.Data[s[0]] = s[1]
+		}
+		break
+	case "ADDRESS":
+		s := strings.Split(data.EventData, ",")
+		data.Data["client_id"] = s[0]
+		data.Data["client_address"] = s[1]
+		data.Data["primary_address"] = s[2]
+		break
+	case "DISCONNECT":
+		data.HasEnd = true
+		data.Data["client_id"] = data.EventData
+		break
+	case "ESTABLISHED":
+		data.Data["client_id"] = data.EventData
+		break
+	case "REAUTH":
+		s := strings.Split(data.EventData, ",")
+		data.Data["client_id"] = s[0]
+		data.Data["client_key_id"] = s[1]
+		data.HasEnd = true
+		break
+	case "CONNECT":
+		data.HasEnd = true
+		s := strings.Split(data.EventData, ",")
+		data.Data["client_id"] = s[0]
+		data.Data["key_id"] = s[1]
+		break
+	default:
+		data.Invalid = true
+		glog.Warningf("Invalid client request: %v", data)
+	}
+
+	return nil
 }
 
-func (cp CommandParser) ParseClients(out string) ([]utils.Client, error) {
+func (cp *CommandParser) ParseStatus(out string) ([]utils.Client, error) {
 	match := cp.ClientListReg.FindAllStringSubmatch(out, -1)
 	if len(match) == 0 {
 		return nil, errors.New("no client found")
@@ -124,6 +247,7 @@ func (CommandParser) parseInt64(d string) int64 {
 	}
 	return n
 }
+
 
 func (CommandParser) makeCsvList(data string) (list []map[string]string) { // {{{
 	list = make([]map[string]string, 0)

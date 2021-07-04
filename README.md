@@ -37,3 +37,7 @@ First use the following command to create a PSK (pre shared key)
   			log.Println("Event: ", event.Name, "(", event.Args, ")")
   		}
   	}
+
+# References
++ OpenVPN management interface: https://openvpn.net/community-resources/management-interface/
++ Change certificate signature: https://itigloo.com/security/change-openssl-default-signature-algorithm/

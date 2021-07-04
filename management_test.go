@@ -1,4 +1,4 @@
-package go_openvpn
+package openvpn
 
 import (
 	"github.com/mungaij83/go-openvpn/core"

@@ -1,120 +1,40 @@
-package go_openvpn
+package openvpn
 
 import (
 	"bufio"
 	"fmt"
+	"github.com/golang/glog"
 	"github.com/mungaij83/go-openvpn/utils"
 	"os/exec"
 	"sync"
 
-	log "github.com/cihub/seelog"
-	"github.com/stamp/go-openssl"
 )
 
 type Process struct {
-	StdOut     chan string       `json:"-"`
-	StdErr     chan string       `json:"-"`
-	Events     chan *utils.Event `json:"-"`
-	Stopped    chan bool         `json:"-"`
+	StdOut     chan string `json:"-"`
+	StdErr     chan string `json:"-"`
+	Stopped    chan bool   `json:"-"`
 	parameters []string
-	config     *utils.Config
+	socket     string
+	config     *Config
 	Env        map[string]string
 	Clients    map[string]*utils.Client
-
-	management *Management
-
-	shutdown  chan bool
-	waitGroup sync.WaitGroup
+	shutdown   chan bool
+	waitGroup  sync.WaitGroup
 }
 
-func NewProcess() *Process {
+func NewProcess(socket string, config*Config) *Process {
 	p := &Process{
-		Env:     make(map[string]string, 0),
-		Events:  make(chan *utils.Event, 10),
-		Clients: make(map[string]*utils.Client, 0),
-
+		Env:      make(map[string]string, 0),
+		Clients:  make(map[string]*utils.Client, 0),
+		socket:   socket,
+		config: config,
 		shutdown: make(chan bool),
 	}
-
-	p.management = NewManagement(p)
-
 	return p
 }
 
-// Short-hands for some basic openvpn operating modes
-
-func NewSslServer(ca *openssl.CA, cert *openssl.Cert, dh *openssl.DH, ta *openssl.TA) *Process { // {{{
-	p := NewProcess()
-	c := utils.NewConfig()
-
-	c.Device("tun")
-	c.ServerMode(1194, ca, cert, dh, ta)
-	c.IpPool("10.255.255.0/24")
-
-	c.KeepAlive(10, 60)
-	c.PingTimerRemote()
-	c.PersistTun()
-	c.PersistKey()
-
-	p.SetConfig(c)
-	return p
-}                                                                                                               // }}}
-func NewSslClient(remote string, ca *openssl.CA, cert *openssl.Cert, dh *openssl.DH, ta *openssl.TA) *Process { // {{{
-	p := NewProcess()
-	c := utils.NewConfig()
-
-	c.ClientMode(ca, cert, dh, ta)
-	c.Remote(remote, 1194)
-	c.Device("tun")
-
-	c.KeepAlive(10, 60)
-	c.PingTimerRemote()
-	c.PersistTun()
-	c.PersistKey()
-
-	p.SetConfig(c)
-	return p
-}                                              // }}}
-func NewStaticKeyServer(key string) *Process { // {{{
-	p := NewProcess()
-	c := utils.NewConfig()
-
-	c.Device("tun")
-	c.IpConfig("10.8.0.1", "10.8.0.2")
-	c.Secret(key)
-
-	c.KeepAlive(10, 60)
-	c.PingTimerRemote()
-	c.PersistTun()
-	c.PersistKey()
-
-	p.SetConfig(c)
-	return p
-}
-
-func NewStaticKeyClient(remote, key string) *Process {
-	p := NewProcess()
-	c := utils.NewConfig()
-
-	c.Remote(remote, 1194)
-	c.Device("tun")
-	c.IpConfig("10.8.0.2", "10.8.0.1")
-	c.Secret(key)
-
-	c.KeepAlive(10, 60)
-	c.PingTimerRemote()
-	c.PersistTun()
-	c.PersistKey()
-
-	p.SetConfig(c)
-	return p
-}
-
-func (p *Process) SetConfig(c *utils.Config) {
-	p.config = c
-}
-
-func (p *Process) Start() (err error) { // {{{
+func (p *Process) Start() (err error) {
 	// Check if the process is already running
 	if p.Stopped != nil {
 		select {
@@ -123,11 +43,6 @@ func (p *Process) Start() (err error) { // {{{
 		default:
 			return fmt.Errorf("openvpn is already started, aborting")
 		}
-	}
-	// Start the management interface (if it isnt already started)
-	err = p.management.Start()
-	if err != nil {
-		return err
 	}
 	// Add the management interface path to the config
 	return p.Restart()
@@ -140,11 +55,8 @@ func (p *Process) Stop() (err error) {
 	return
 }
 
-func (p *Process) Shutdown() (err error) {
-	p.Stop()
-	p.management.Shutdown()
-
-	return
+func (p *Process) Shutdown() error {
+	return p.Stop()
 }
 
 func (p *Process) Restart() (err error) {
@@ -153,7 +65,7 @@ func (p *Process) Restart() (err error) {
 	if err != nil {
 		return err
 	}
-
+	glog.V(1).Infof("OPENVPN: Parameters: %+v", config)
 	// Create the command
 	cmd := exec.Command("openvpn", config...)
 
@@ -165,21 +77,11 @@ func (p *Process) Restart() (err error) {
 	// Try to start the process
 	err = cmd.Start()
 	if err != nil {
+		glog.Errorf("RESTART FAILED: %v", err)
 		return err
 	}
 
 	return
-}
-
-func (p *Process) Fire(name string, args ...string) {
-	select {
-	case p.Events <- &utils.Event{
-		Name: name,
-		Args: args,
-	}:
-	default:
-		log.Warn("Lost event: ", name, " args:", args)
-	}
 }
 
 func (p *Process) ProcessMonitor(cmd *exec.Cmd, release chan bool) {
@@ -210,9 +112,9 @@ func (p *Process) ProcessMonitor(cmd *exec.Cmd, release chan bool) {
 				return
 			}
 			err := <-done // allow goroutine to exit
-			log.Error("process killed with error = ", err)
+			glog.Errorf("process killed with error = %v", err)
 		case err := <-done:
-			log.Error("process done with error = ", err)
+			glog.Errorf("process done with error = %v", err)
 			return
 		}
 
@@ -230,12 +132,12 @@ func (p *Process) stdoutMonitor(cmd *exec.Cmd) {
 			select {
 			case p.StdOut <- scanner.Text():
 			default:
-				log.Trace("OPENVPN stdout: ", scanner.Text())
+				glog.V(2).Infof("OPENVPN stdout: %v", scanner.Text())
 			}
 
 		}
 		if err := scanner.Err(); err != nil {
-			log.Warn("OPENVPN stdout: (failed to read: ", err, ")")
+			glog.Warningf("OPENVPN stdout: (failed to read: %v)", err)
 			return
 		}
 	}()
@@ -252,11 +154,11 @@ func (p *Process) stderrMonitor(cmd *exec.Cmd) {
 			select {
 			case p.StdErr <- scanner.Text():
 			default:
-				log.Warn("OPENVPN stderr: ", scanner.Text())
+				glog.Warningf("OPENVPN stderr: %v", scanner.Text())
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			log.Warn("OPENVPN stderr: (failed to read ", err, ")")
+			glog.Warningf("OPENVPN stderr: (failed to read %v)", err)
 			return
 		}
 	}()

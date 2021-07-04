@@ -8,6 +8,6 @@ const (
 type OpenVpnConnector interface {
 	Connect() error
 	SendCommand(string) (string, error)
-	Listen(events chan []string)
+	Listen(events chan string)
 	Close() error
 }

@@ -1,13 +1,21 @@
 package core
 
 import (
+	"flag"
 	"os"
 	"testing"
 )
 
 var parser CommandParser
 
+//func init() {
+//
+//}
+
 func TestMain(m *testing.M) {
+	_ = flag.Set("v", "3")
+	_ = flag.Set("logtostderr", "true")
+	flag.Parse()
 	parser = NewCommandParser()
 	os.Exit(m.Run())
 }
@@ -25,23 +33,34 @@ func TestCLientLine(t *testing.T) {
 }
 
 func TestParseClients(t *testing.T) {
-	out:="OpenVPN CLIENT LIST\n"+
-		"Updated, Thu Feb 13 23:39:20 2014\n"+
-		"Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since\n"+
-		"VPN_client,10.13.156.4:1194,12563,14885,Thu Feb 13 23:39:20 2014\n"+
-		"ROUTING TABLE\n"+
-		"Virtual Address,Common Name,Real Address,Last Ref\n"+
-		"192.168.11.4,VPN_client,10.13.156.4:1194,Thu Feb 13 23:39:20 2014\n"+
-		"GLOBAL STATS\n"+
-		"Max bcast/mcast queue length,0\n"+
-		"END\n"
-	evt:=parser.ParseEvent(out)
-	t.Logf("EVENT: %+v", evt)
-	clients,err:=parser.ParseClients(evt.EventData)
-	if err!=nil {
-		t.Fatal(err)
+	out:=[]string{
+		"OpenVPN CLIENT LIST\n",
+		"Updated, Thu Feb 13 23:39:20 2014\n",
+		"Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since\n",
+		"VPN_client,10.13.156.4:1194,12563,14885,Thu Feb 13 23:39:20 2014\n",
+		"ROUTING TABLE\n",
+		"Virtual Address,Common Name,Real Address,Last Ref\n",
+		"192.168.11.4,VPN_client,10.13.156.4:1194,Thu Feb 13 23:39:20 2014\n",
+		"GLOBAL STATS\n",
+		"Max bcast/mcast queue length,0\n",
+		"END\n"}
+	var evt *EventData
+	for _,t:=range out {
+		evt=parser.ParseEvent(t)
+		if evt!=nil {
+			break
+		}
+	}
+	if evt==nil{
+		t.Fatal("Failed to parse output")
 	} else {
-		t.Logf("Clients: %+v", clients)
+		t.Logf("EVENT: %+v", evt)
+		clients, err := parser.ParseStatus(evt.EventData)
+		if err != nil {
+			t.Fatal(err)
+		} else {
+			t.Logf("Clients: %+v", clients)
+		}
 	}
 }
 

@@ -1,10 +1,9 @@
 package main
 
 import (
+	"github.com/mungaij83/go-openvpn"
+	openssl "github.com/mungaij83/go-openvpn/core/ssl"
 	"log"
-
-	"github.com/stamp/go-openssl"
-	"github.com/stamp/go-openvpn"
 )
 
 func main() {
@@ -44,18 +43,27 @@ func main() {
 		log.Println("LoadOrCreateTA failed: ", err)
 		return
 	}
+	c := openvpn.NewConfig("")
 
+	c.ClientMode(ca, cert, dh, ta)
+	c.Remote("remote", 1194)
+	c.Device("tun")
+
+	c.KeepAlive(10, 60)
+	c.PingTimerRemote()
+	c.PersistTun()
+	c.PersistKey()
 	// Create the openvpn instance
-	p := openvpn.NewSslClient("localhost", ca, cert, dh, ta,"")
+	p := openvpn.NewProcess("localhost", c)
 
 	// Start the process
 	p.Start()
 
 	// Listen for events
-	for {
-		select {
-		case event := <-p.Events:
-			log.Println("Event: ", event.Name, "(", event.Args, ")")
-		}
-	}
+	//for {
+	//	select {
+	//	case event := <-p.Events:
+	//		log.Println("Event: ", event.Name, "(", event.Args, ")")
+	//	}
+	//}
 }

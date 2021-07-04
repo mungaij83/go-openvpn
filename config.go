@@ -1,27 +1,47 @@
-package utils
+package openvpn
 
 import (
+	"flag"
+	"fmt"
+	"github.com/golang/glog"
+	openssl "github.com/mungaij83/go-openvpn/core/ssl"
 	"net"
+	"os"
 	"strconv"
 	"strings"
-
-	log "github.com/cihub/seelog"
-	"github.com/stamp/go-openssl"
 )
 
 type Config struct {
-	remote string
-	flags  map[string]bool
-	values map[string]string
-	params []string
+	remote     string
+	port       int
+	ipAddress  string
+	socketPath string
+	flags      map[string]bool
+	values     map[string]string
+	params     []string
 }
 
-func NewConfig() *Config {
-	return &Config{
-		flags:  make(map[string]bool),
-		values: make(map[string]string),
-		params: make([]string, 0),
+func NewConfig(socket string) *Config {
+	c := &Config{
+		socketPath: socket,
+		ipAddress:  "127.0.0.1",
+		port:       7505,
+		flags:      make(map[string]bool),
+		values:     make(map[string]string),
+		params:     make([]string, 0),
 	}
+	// Socket configuration
+	c.Flag("management-signal")
+	c.Flag("management-up-down")
+	c.Flag("management-client")
+	if socket != "" {
+		c.Set("management", fmt.Sprintf("%s unix", socket))
+		//c.Flag("management-hold")
+		glog.Infof("Current config: %v", c)
+	} else if c.ipAddress != "" {
+		c.Set("management", fmt.Sprintf("%s %d", c.ipAddress, c.port))
+	}
+	return c
 }
 
 func (c *Config) Set(key, val string) {
@@ -46,15 +66,26 @@ func (c *Config) Validate() (config []string, err error) {
 func (c *Config) ServerMode(port int, ca *openssl.CA, cert *openssl.Cert, dh *openssl.DH, ta *openssl.TA) {
 	c.Set("mode", "server")
 	c.Set("port", strconv.Itoa(port))
-	c.Flag("tls-server")
+	f := flag.Lookup("v")
+	if f != nil {
+		c.Set("verb", f.Value.String())
+	} else {
+		c.Set("verb", "3")
+	}
+	o, _ := os.Getwd()
 
+	c.Set("cd", o)
 	c.Set("ca", ca.GetFilePath())
 	c.Set("crl-verify", ca.GetCRLPath())
 	c.Set("cert", cert.GetFilePath())
 	c.Set("key", cert.GetKeyPath())
 	c.Set("dh", dh.GetFilePath())
-	c.Set("tls-auth", ta.GetFilePath())
+	if ta != nil {
+		c.Flag("tls-server")
+		c.Set("tls-auth", ta.GetFilePath())
+	}
 }
+
 func (c *Config) ClientMode(ca *openssl.CA, cert *openssl.Cert, dh *openssl.DH, ta *openssl.TA) {
 	c.Flag("client")
 	c.Flag("tls-client")
@@ -77,21 +108,33 @@ func (c *Config) Protocol(p string) {
 func (c *Config) Device(t string) {
 	c.Set("dev", t)
 }
-func (c *Config) IpConfig(local, remote string) {
-}
+
 func (c *Config) IpPool(pool string) {
 
-	ip, net, err := net.ParseCIDR(pool)
+	ip, network, err := net.ParseCIDR(pool)
 	if err != nil {
-		log.Error(err)
+		glog.Error(err)
 		return
 	}
 
-	c.Set("server", ip.String()+" "+strconv.Itoa(int(net.Mask[0]))+"."+strconv.Itoa(int(net.Mask[1]))+"."+strconv.Itoa(int(net.Mask[2]))+"."+strconv.Itoa(int(net.Mask[3])))
+	c.Set("server", ip.String()+" "+strconv.Itoa(int(network.Mask[0]))+"."+strconv.Itoa(int(network.Mask[1]))+"."+strconv.Itoa(int(network.Mask[2]))+"."+strconv.Itoa(int(network.Mask[3])))
 }
 
 func (c *Config) Secret(key string) {
 	c.Set("secret", key)
+}
+func (c *Config) Address(address string, port int) {
+	c.ipAddress = address
+	c.port = port
+	c.Set("management", fmt.Sprintf("%s %d", c.ipAddress, c.port))
+}
+
+func (c *Config) Port() int {
+	return c.port
+}
+
+func (c *Config) InterfaceAddress() string {
+	return c.ipAddress
 }
 
 func (c *Config) KeepAlive(interval, timeout int) {
@@ -112,15 +155,4 @@ func (c *Config) Compression() {
 }
 func (c *Config) ClientToClient() {
 	c.Flag("client-to-client")
-}
-
-func (c *Config) setManagementPath(path string) {
-	if path != "" {
-		c.Set("management", path+" unix")
-		c.Flag("management-client")
-		c.Flag("management-hold")
-		c.Flag("management-signal")
-		c.Flag("management-up-down")
-		log.Info("Current config:", c)
-	}
 }
